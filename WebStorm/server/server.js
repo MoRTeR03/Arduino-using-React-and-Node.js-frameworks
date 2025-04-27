@@ -10,50 +10,100 @@ const wss = new WebSocket.Server({ server });
 let esp32Connection = null;
 let browserClients = [];
 
+// Функція перекладу команд у формат для Arduino
+const translateCommand = (cmd) => {
+  switch (cmd) {
+    case "forward": return "%F#";
+    case "backward": return "%B#";
+    case "left": return "%L#";
+    case "right": return "%R#";
+    case "stop": return "%S#";
+    default: return cmd; // Якщо невідомо — шлемо як є
+  }
+};
+
 wss.on('connection', (ws) => {
   console.log("New connection");
 
   ws.on('message', (message) => {
-    console.log('Received:', message);
+    const msgStr = message.toString().trim();
+    console.log("[WS received]:", msgStr);
 
     try {
-      const parsed = JSON.parse(message);
+      const parsed = JSON.parse(msgStr);
 
+      // Якщо це сенсорні дані з ESP32 ➔ тільки шлемо в браузер
       if (parsed.type === "sensor") {
-        // Сенсорні дані від ESP32
         browserClients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: "sensor", payload: parsed.payload }));
+            client.send(JSON.stringify({
+              type: "sensor",
+              payload: parsed.payload
+            }));
           }
         });
-      } else {
-        if (message.toString() === "ESP32") {
-          esp32Connection = ws;
-          console.log('ESP32 connected');
-        } else {
-          // Команда для ESP32
-          if (esp32Connection) {
-            esp32Connection.send(message);
-          }
-        }
       }
+      // Якщо це обʼєкт з температурою ➔ теж тільки в браузер
+      else if (parsed.temperature !== undefined) {
+        browserClients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(parsed));
+          }
+        });
+      }
+
     } catch (e) {
-      // Це просто текстова команда
-      if (message.toString() === "ESP32") {
+      // Якщо це НЕ JSON
+
+      if (msgStr === "ESP32") {
         esp32Connection = ws;
-        console.log('ESP32 connected');
-      } else {
-        if (esp32Connection) {
-          esp32Connection.send(message);
-        }
+        console.log("✅ ESP32 підключено");
+        return;
+      }
+
+      // Якщо це сенсорний текст (TMP:...), шлемо тільки в браузер
+      if (msgStr.startsWith("TMP:")) {
+        const parts = msgStr.split(',');
+        const sensorData = {};
+
+        parts.forEach(part => {
+          const [key, value] = part.split(':');
+          if (key && value) {
+            if (key === "TMP") sensorData.temperature = parseFloat(value);
+            if (key === "HUM") sensorData.humidity = parseFloat(value);
+            if (key === "PRS") sensorData.pressure = parseFloat(value);
+            if (key === "LGT") sensorData.light = parseInt(value);
+            if (key === "SND") sensorData.sound = parseInt(value);
+            if (key === "CO")  sensorData.co = parseInt(value);
+          }
+        });
+
+        // Надсилаємо в браузер
+        browserClients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(sensorData));
+          }
+        });
+        return;
+      }
+
+      // Якщо це проста команда ➔ перекладаємо і шлемо на ESP32
+      if (esp32Connection && esp32Connection.readyState === WebSocket.OPEN) {
+        const translated = translateCommand(msgStr);
+        console.log("✅ Передаю команду на ESP32:", translated);
+        esp32Connection.send(translated);
       }
     }
   });
 
   ws.on('close', () => {
+    console.log("❌ З'єднання закрито");
+
     if (ws === esp32Connection) {
+      console.log("⚠️ ESP32 втрачено");
       esp32Connection = null;
     }
+
     browserClients = browserClients.filter(c => c !== ws);
   });
 
@@ -65,5 +115,5 @@ app.get('/', (req, res) => {
 });
 
 server.listen(3000, () => {
-  console.log('Server started on port 3000');
+  console.log('🚀 Сервер запущено на порту 3000');
 });

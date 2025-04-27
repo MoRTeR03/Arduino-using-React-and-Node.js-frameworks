@@ -1,6 +1,5 @@
 #include "IR_remote.h"
 #include "keymap.h"
-
 #include <Servo.h>
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -11,27 +10,22 @@ Servo servo_10;
 Adafruit_BME680 bme;
 
 // --- Таймери ---
-unsigned long lastLightRead = 0;
-unsigned long lastSoundRead = 0;
-unsigned long lastBMERead = 0;
-unsigned long lastMQ7Read = 0;
+unsigned long lastSensorSend = 0;
 const unsigned long sensorInterval = 3000;
+unsigned long lastPing = 0;
+
+String uartBuffer = "";
 
 int motorSpeed = 20;
-
-// --- Стан системи ---
 volatile float V_Servo_angle = 90;
 volatile int Front_Distance = 0;
 volatile char IR_Car_Mode = ' ';
 volatile boolean IR_Mode_Flag = false;
 
-String BLE_value, BLE_value_temp;
-
 // --- Сенсори ---
 void updateSensorsAndSend() {
-  static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate < sensorInterval) return;
-  lastUpdate = millis();
+  if (millis() - lastSensorSend < sensorInterval) return;
+  lastSensorSend = millis();
 
   int lightValue = analogRead(A0);
   int soundValue = analogRead(A1);
@@ -44,20 +38,19 @@ void updateSensorsAndSend() {
     hum = bme.humidity;
   }
 
-  // Надсилаємо JSON через Serial (для ESP32)
-  Serial.print("{\"temperature\":");
-  Serial.print(temp);
-  Serial.print(",\"humidity\":");
-  Serial.print(hum);
-  Serial.print(",\"pressure\":");
-  Serial.print(press);
-  Serial.print(",\"light\":");
+  Serial.print("TMP:");
+  Serial.print(temp, 2);
+  Serial.print(",HUM:");
+  Serial.print(hum, 2);
+  Serial.print(",PRS:");
+  Serial.print(press, 2);
+  Serial.print(",LGT:");
   Serial.print(lightValue);
-  Serial.print(",\"sound\":");
+  Serial.print(",SND:");
   Serial.print(soundValue);
-  Serial.print(",\"co\":");
-  Serial.print(mq7Value);
-  Serial.println("}");
+  Serial.print(",CO:");
+  Serial.println(mq7Value);
+  Serial.flush();
 }
 
 // --- Рух ---
@@ -120,26 +113,26 @@ void IR_remote_control() {
   else if (code == IR_KEYCODE_3)     { motorSpeed = max(0, motorSpeed - 10); Serial.print("Швидкість: "); Serial.println(motorSpeed); }
 }
 
-// --- Команди з ESP32 або Bluetooth ---
+// --- Обробка команд з ESP32 ---
 void handleSerialCommand(String cmd) {
+  cmd.trim();
+  Serial.print("[Arduino] Отримано команду: ");
+  Serial.println(cmd);
+
   if (cmd.startsWith("%") && cmd.endsWith("#")) {
-    switch (cmd.charAt(1)) {
+    char command = cmd.charAt(1);
+
+    switch (command) {
+      case 'F': Move_Forward(motorSpeed); break;
+      case 'B': Move_Backward(motorSpeed); break;
+      case 'L': Rotate_Left(motorSpeed); break;
+      case 'R': Rotate_Right(motorSpeed); break;
+      case 'S': STOP(); break;
       case 'H': V_Servo_angle = min(180, V_Servo_angle + 4); servo_10.write(round(V_Servo_angle)); break;
       case 'G': V_Servo_angle = max(0, V_Servo_angle - 4); servo_10.write(round(V_Servo_angle)); break;
-      case 'F': Move_Forward(motorSpeed); delay(400); break;
-      case 'B': Move_Backward(motorSpeed); delay(400); break;
-      case 'L': Rotate_Left(motorSpeed); delay(250); break;
-      case 'R': Rotate_Right(motorSpeed); delay(250); break;
-      case 'S': STOP(); break;
       case 'A': Ultrasonic_Avoidance(); break;
       case 'Z': Ultrasonic_Follow(); break;
     }
-  } else {
-    if (cmd == "forward") Move_Forward(motorSpeed);
-    else if (cmd == "backward") Move_Backward(motorSpeed);
-    else if (cmd == "left") Rotate_Left(motorSpeed);
-    else if (cmd == "right") Rotate_Right(motorSpeed);
-    else if (cmd == "stop") STOP();
   }
 }
 
@@ -165,18 +158,28 @@ void setup() {
 
 // --- loop ---
 void loop() {
-  updateSensorsAndSend();   // Надсилання сенсорних даних
-  IR_remote_control();      // Обробка ІЧ
+  updateSensorsAndSend();
+  IR_remote_control();
+
+  if (millis() - lastPing >= 3000) {
+    Serial.println("PING");
+    lastPing = millis();
+  }
 
   while (Serial.available() > 0) {
     char c = Serial.read();
-    BLE_value_temp += c;
-    delay(2);
-    if (!Serial.available()) {
-      BLE_value = BLE_value_temp;
-      BLE_value_temp = "";
-      handleSerialCommand(BLE_value);
-      BLE_value = "";
+    if (c == '\n') {
+      uartBuffer.trim();
+      if (uartBuffer.length() > 0) {
+        if (uartBuffer == "PONG") {
+          Serial.println("ESP32 відповів: PONG");
+        } else {
+          handleSerialCommand(uartBuffer);
+        }
+      }
+      uartBuffer = "";
+    } else {
+      uartBuffer += c;
     }
   }
 }
